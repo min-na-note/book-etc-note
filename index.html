@@ -1221,6 +1221,54 @@ async function handleConfirmDelete(){
 /* ============================================================
    OpenBD連携（ISBNから書誌情報を自動入力）
    ============================================================ */
+// 画像が実際に表示できるか確認（表示できなければ null）
+function probeImage(url, timeoutMs){
+  return new Promise(resolve=>{
+    if(!url){ resolve(null); return; }
+    const img = new Image();
+    let done = false;
+    const finish = ok => { if(done) return; done = true; clearTimeout(timer); resolve(ok ? url : null); };
+    const timer = setTimeout(()=>finish(false), timeoutMs || 6000);
+    img.onload = ()=> finish(img.naturalWidth > 40 && img.naturalHeight > 40);
+    img.onerror = ()=> finish(false);
+    img.src = url;
+  });
+}
+
+async function fetchOpenBd(isbn){
+  const res = await fetch(`https://api.openbd.jp/v1/get?isbn=${encodeURIComponent(isbn)}`);
+  const json = await res.json();
+  return (json && json[0]) || null;
+}
+
+// OpenBDに無い本・表紙が無い本の保険：Google Books
+async function fetchGoogleBooks(isbn){
+  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&maxResults=1`);
+  const json = await res.json();
+  const v = json && json.items && json.items[0] && json.items[0].volumeInfo;
+  if(!v) return null;
+  let cover = v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail) || '';
+  cover = cover.replace(/^http:/,'https:').replace(/&edge=curl/,'');
+  return {
+    title: v.title ? (v.subtitle ? `${v.title} ${v.subtitle}` : v.title) : '',
+    author: (v.authors || []).join(', '),
+    summary: v.description || '',
+    cover
+  };
+}
+
+// 表紙画像を順番に探す：OpenBD → 国立国会図書館 → Google Books → Open Library
+async function findCoverUrl(isbn, openBdCover, googleCover){
+  const candidates = [
+    openBdCover,
+    `https://ndlsearch.ndl.go.jp/thumbnail/${isbn}.jpg`,
+    googleCover,
+    `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`
+  ].filter(Boolean);
+  const results = await Promise.all(candidates.map(u => probeImage(u, 6000)));
+  return results.find(Boolean) || '';
+}
+
 async function handleOpenBdFetch(){
   const isbn = document.getElementById('fIsbn').value.trim().replace(/-/g,'');
   if(!isbn){ showToast('ISBNを入力してください', true); return; }
@@ -1228,30 +1276,46 @@ async function handleOpenBdFetch(){
   const btn = document.getElementById('btnOpenBd');
   btn.disabled = true; btn.textContent = '検索中...';
   try{
-    const res = await fetch(`https://api.openbd.jp/v1/get?isbn=${encodeURIComponent(isbn)}`);
-    const json = await res.json();
-    const item = json && json[0];
-    if(!item){
-      showToast('該当する書籍が見つかりませんでした', true);
+    const [bd, gb] = await Promise.all([
+      fetchOpenBd(isbn).catch(()=>null),
+      fetchGoogleBooks(isbn).catch(()=>null)
+    ]);
+
+    const summary = (bd && bd.summary) || {};
+    const title = summary.title || (gb && gb.title) || '';
+    const author = summary.author ? summary.author.replace(/\/.*/,'').trim() : ((gb && gb.author) || '');
+
+    const coverUrl = await findCoverUrl(isbn, summary.cover, gb && gb.cover);
+
+    if(!title && !coverUrl){
+      showToast('該当する書籍が見つかりませんでした。手入力してください', true);
       return;
     }
-    const summary = item.summary || {};
-    if(summary.title) document.getElementById('fTitle').value = summary.title;
-    if(summary.author) document.getElementById('fAuthor').value = summary.author.replace(/\/.*/,'').trim();
-    if(summary.cover){
-      document.getElementById('fCoverUrl').value = summary.cover;
-      updateCoverPreview(summary.cover);
+
+    if(title) document.getElementById('fTitle').value = title;
+    if(author) document.getElementById('fAuthor').value = author;
+    if(coverUrl){
+      document.getElementById('fCoverUrl').value = coverUrl;
+      updateCoverPreview(coverUrl);
     }
+
     // あらすじ（すでに入力済みなら上書きしない）
-    const tc = item.onix && item.onix.CollateralDetail && item.onix.CollateralDetail.TextContent;
     const summaryEl = document.getElementById('fSummary');
-    if(Array.isArray(tc) && !summaryEl.value.trim()){
-      const t = tc.find(x=>x.TextType==='03') || tc.find(x=>x.TextType==='02') || tc[0];
-      if(t && t.Text) summaryEl.value = String(t.Text).trim();
+    if(!summaryEl.value.trim()){
+      const tc = bd && bd.onix && bd.onix.CollateralDetail && bd.onix.CollateralDetail.TextContent;
+      let text = '';
+      if(Array.isArray(tc)){
+        const t = tc.find(x=>x.TextType==='03') || tc.find(x=>x.TextType==='02') || tc[0];
+        if(t && t.Text) text = String(t.Text).trim();
+      }
+      if(!text && gb && gb.summary) text = gb.summary.trim();
+      if(text) summaryEl.value = text;
     }
-    showToast('本の情報を自動入力しました');
+
+    if(coverUrl) showToast('本の情報と表紙を自動入力しました');
+    else showToast('情報を入力しました。表紙画像は見つからなかったので、URLを手入力してください', true);
   }catch(err){
-    showToast('OpenBDへの問い合わせに失敗しました', true);
+    showToast('書籍情報の取得に失敗しました', true);
   }finally{
     btn.disabled = false; btn.textContent = '✨ 自動入力';
   }
