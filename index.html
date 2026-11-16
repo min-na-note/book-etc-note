@@ -259,6 +259,11 @@ input,select,textarea{font-family:inherit;}
   display:flex;align-items:center;justify-content:space-between;gap:6px;
 }
 .book-age{font-size:10.5px;color:var(--text-mid);}
+.book-by{
+  align-self:flex-start;font-size:10.5px;font-weight:700;color:var(--on-pastel);
+  background:var(--by-bg,var(--lilac-soft));border-radius:999px;padding:2px 9px;
+  max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 .reaction-emoji{font-size:15px;}
 
 /* 星評価 */
@@ -519,7 +524,7 @@ input,select,textarea{font-family:inherit;}
   <!-- ==================== ヒーロー ==================== -->
   <section class="hero">
     <h1>読んでよかった、を<br>ぜんぶ記録する。</h1>
-    <p>子供に読ませたい本と知育おもちゃのライブラリ。あやかの評価と子供のリアルな反応をあわせて残しています。</p>
+    <p>子供に読ませたい本と知育おもちゃのライブラリ。家族それぞれの評価と子供のリアルな反応をあわせて残しています。</p>
     <div class="hero-stats">
       <div class="hero-stat"><b id="statTotal">0</b><span>登録冊数</span></div>
       <div class="hero-stat"><b id="statReadAloud">0</b><span>読み聞かせ済み</span></div>
@@ -529,6 +534,9 @@ input,select,textarea{font-family:inherit;}
 
   <!-- ==================== フィルターバー ==================== -->
   <div class="filter-bar" id="filterBar" style="display:none;">
+    <select class="filter-chip-select" id="filterRegisteredBy">
+      <option value="">👤 登録者：すべて</option>
+    </select>
     <select class="filter-chip-select" id="filterGenre">
       <option value="">すべてのジャンル</option>
     </select>
@@ -591,7 +599,7 @@ input,select,textarea{font-family:inherit;}
       <p id="detailSummary">-</p>
     </div>
     <div class="detail-section">
-      <h4>あやかの感想</h4>
+      <h4 id="detailCommentLabel">感想</h4>
       <p id="detailComment">-</p>
     </div>
     <div class="detail-section" id="detailPurchaseWrap" style="padding-bottom:18px;">
@@ -627,6 +635,12 @@ input,select,textarea{font-family:inherit;}
             <input type="checkbox" id="fContinueScan">
             <span>📷 続けて登録する（保存したら次のバーコードを読み取る）</span>
           </label>
+        </div>
+        <div class="field">
+          <label>登録者</label>
+          <input type="text" id="fRegisteredBy" placeholder="例：あやか" list="registeredByList">
+          <datalist id="registeredByList"></datalist>
+          <p class="field-note">一度入力した名前は次回から候補に出ます。この名前で本棚を絞り込めます。</p>
         </div>
         <div class="field">
           <label>タイトル<span class="req">*</span></label>
@@ -670,7 +684,7 @@ input,select,textarea{font-family:inherit;}
           <textarea id="fSummary" placeholder="どんなお話か、簡単に"></textarea>
         </div>
         <div class="field">
-          <label>あやかの評価</label>
+          <label>評価</label>
           <div style="display:flex;align-items:center;">
             <div class="star-input" id="fRatingInput"></div>
             <span class="star-input-value" id="fRatingValueLabel">0</span>
@@ -793,10 +807,11 @@ const NO_IMAGE = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
    ============================================================ */
 const state = {
   books: [],
+  users: [],
   isLoading: true,
   isAdmin: false,
   adminPassword: '',
-  filters: { genre:'', age:'', reaction:'', readStatus:'', search:'' },
+  filters: { registeredBy:'', genre:'', age:'', reaction:'', readStatus:'', search:'' },
   sortBy: 'newest',
   editingId: null,       // フォームが編集モードのときの対象id
   detailBookId: null,    // 詳細モーダルで表示中のid
@@ -833,10 +848,11 @@ async function loadBooks(){
   state.isLoading = true;
   renderGrid();
   try{
-    const res = await fetch(`${CONFIG.GAS_API_URL}?action=getBooks`);
+    const res = await fetch(CONFIG.GAS_API_URL);
     const json = await res.json();
-    if(!json.success) throw new Error(json.error || '読み込みに失敗しました');
+    if(json.status !== 'ok') throw new Error(json.message || '読み込みに失敗しました');
     state.books = json.data || [];
+    state.users = json.users || [];
     populateFilterOptions();
     renderStats();
   }catch(err){
@@ -847,21 +863,48 @@ async function loadBooks(){
   }
 }
 
-async function apiWrite(action, data){
+// payload 例：{ book:{...} } / { id:'bk_...' }
+async function apiWrite(action, payload){
   const res = await fetch(CONFIG.GAS_API_URL, {
     method:'POST',
     headers:{ 'Content-Type':'text/plain;charset=utf-8' }, // CORSプリフライト回避
-    body: JSON.stringify({ action, password: state.adminPassword, data })
+    body: JSON.stringify(Object.assign({ action, password: state.adminPassword }, payload))
   });
   const json = await res.json();
-  if(!json.success) throw new Error(json.error || '処理に失敗しました');
+  if(json.status !== 'ok') throw new Error(json.message || '処理に失敗しました');
   return json.data;
 }
 
 /* ============================================================
    フィルター・並び替え・検索
    ============================================================ */
+// 登録者の一覧（users シート ＋ 本に入っている名前）
+function getRegisteredByNames(){
+  const names = state.users.map(u=>u.name)
+    .concat(state.books.map(b=>b.registeredBy))
+    .map(n=>String(n||'').trim()).filter(Boolean);
+  return Array.from(new Set(names));
+}
+// 登録者ごとの色・絵文字（users シートにあれば使う）
+const USER_COLORS = { pink:'var(--pink-soft)', sky:'var(--sky-soft)', sun:'var(--sun-soft)', mint:'var(--mint-soft)', lilac:'var(--lilac-soft)', peach:'var(--peach)' };
+const AUTO_COLORS = ['var(--pink-soft)','var(--sky-soft)','var(--mint-soft)','var(--sun-soft)','var(--lilac-soft)'];
+function userInfo(name){
+  const u = state.users.find(x=>x.name===name);
+  const idx = Math.max(0, getRegisteredByNames().indexOf(name));
+  const color = (u && (USER_COLORS[u.color] || (String(u.color||'').startsWith('#') ? u.color : ''))) || AUTO_COLORS[idx % AUTO_COLORS.length];
+  return { emoji: (u && u.emoji) || '👤', color };
+}
+
 function populateFilterOptions(){
+  const bySel = document.getElementById('filterRegisteredBy');
+  const existingBy = bySel.value;
+  const names = getRegisteredByNames();
+  bySel.innerHTML = '<option value="">👤 登録者：すべて</option>' +
+    names.map(n=>`<option value="${escapeHtml(n)}">${escapeHtml(userInfo(n).emoji + ' ' + n)}</option>`).join('');
+  bySel.value = existingBy;
+  document.getElementById('registeredByList').innerHTML =
+    names.map(n=>`<option value="${escapeHtml(n)}">`).join('');
+
   const genreSel = document.getElementById('filterGenre');
   const ageSel = document.getElementById('filterAge');
   const existingGenre = genreSel.value, existingAge = ageSel.value;
@@ -885,11 +928,12 @@ function getFilteredSortedBooks(){
     const q = f.search.toLowerCase();
     list = list.filter(b => (b.title||'').toLowerCase().includes(q) || (b.author||'').toLowerCase().includes(q));
   }
+  if(f.registeredBy) list = list.filter(b => b.registeredBy === f.registeredBy);
   if(f.genre) list = list.filter(b => b.genre === f.genre);
   if(f.age) list = list.filter(b => b.targetAge === f.age);
   if(f.reaction) list = list.filter(b => b.childReaction === f.reaction);
-  if(f.readStatus === 'done') list = list.filter(b => b.isReadAloud === true);
-  if(f.readStatus === 'notyet') list = list.filter(b => b.isReadAloud !== true);
+  if(f.readStatus === 'done') list = list.filter(b => b.readAloud === true);
+  if(f.readStatus === 'notyet') list = list.filter(b => b.readAloud !== true);
 
   switch(state.sortBy){
     case 'ratingDesc': list.sort((a,b)=> (b.rating||0)-(a.rating||0)); break;
@@ -904,9 +948,11 @@ function getFilteredSortedBooks(){
    レンダリング：統計
    ============================================================ */
 function renderStats(){
-  const total = state.books.length;
-  const readAloud = state.books.filter(b=>b.isReadAloud).length;
-  const rated = state.books.filter(b=>b.rating>0);
+  const by = state.filters.registeredBy;
+  const books = by ? state.books.filter(b=>b.registeredBy===by) : state.books;
+  const total = books.length;
+  const readAloud = books.filter(b=>b.readAloud).length;
+  const rated = books.filter(b=>b.rating>0);
   const avg = rated.length ? (rated.reduce((s,b)=>s+Number(b.rating||0),0)/rated.length).toFixed(1) : '-';
   document.getElementById('statTotal').textContent = total;
   document.getElementById('statReadAloud').textContent = readAloud;
@@ -957,7 +1003,7 @@ function renderGrid(){
 // 表紙の候補URL：保存済みURL(httpはhttpsに) → 国立国会図書館 → openBD の順に試す
 function coverCandidates(b){
   const list = [];
-  const saved = String(b.coverImageUrl || '').trim().replace(/^http:\/\//i, 'https://');
+  const saved = String(b.coverImage || '').trim().replace(/^http:\/\//i, 'https://');
   if(saved) list.push(saved);
   const isbn = normalizeIsbn(b.isbn);
   if(/^\d{13}$/.test(isbn)){
@@ -1009,7 +1055,7 @@ function bookCardHtml(b){
     <div class="book-cover">
       ${coverHtml}
       ${b.genre ? `<span class="genre-tag" style="${genreVars(b.genre)}">${escapeHtml(b.genre)}</span>` : ''}
-      ${b.isReadAloud ? `<span class="readaloud-badge" title="読み聞かせ済み">📖</span>` : ''}
+      ${b.readAloud ? `<span class="readaloud-badge" title="読み聞かせ済み">📖</span>` : ''}
       ${state.isAdmin ? `
         <div class="card-admin-controls">
           <button data-quick-edit="${b.id}" title="編集">✏️</button>
@@ -1019,6 +1065,7 @@ function bookCardHtml(b){
     <div class="book-info">
       <div class="book-title">${escapeHtml(b.title)}</div>
       <div class="book-author">${escapeHtml(b.author||'著者不明')}</div>
+      ${b.registeredBy ? `<span class="book-by" style="--by-bg:${userInfo(b.registeredBy).color}">${escapeHtml(userInfo(b.registeredBy).emoji + ' ' + b.registeredBy)}</span>` : ''}
       <div class="book-meta-row">
         ${renderStarsHtml(b.rating, false)}
         <span class="reaction-emoji">${reactionEmoji}</span>
@@ -1101,16 +1148,18 @@ function openDetailModal(id){
 
   const tags = [];
   if(b.genre) tags.push(`<span class="tag tag-genre" style="${genreVars(b.genre)}">${escapeHtml(b.genre)}</span>`);
+  if(b.registeredBy) tags.push(`<span class="tag" style="background:${userInfo(b.registeredBy).color};border-color:transparent;color:var(--on-pastel);">${escapeHtml(userInfo(b.registeredBy).emoji + ' ' + b.registeredBy)}</span>`);
   if(b.targetAge) tags.push(`<span class="tag">${escapeHtml(b.targetAge)}</span>`);
   if(b.childReaction) tags.push(`<span class="tag">${ {'好き':'💛 好き','普通':'🙂 普通','微妙':'😕 微妙'}[b.childReaction] }</span>`);
-  tags.push(`<span class="tag">${b.isReadAloud ? '📖 読み聞かせ済み' : '未読み聞かせ'}</span>`);
+  tags.push(`<span class="tag">${b.readAloud ? '📖 読み聞かせ済み' : '未読み聞かせ'}</span>`);
   document.getElementById('detailTags').innerHTML = tags.join('');
 
   document.getElementById('detailStars').innerHTML = renderStarsHtml(b.rating, false).replace('<span class="stars">','<span class="stars lg">');
   document.getElementById('detailRatingNum').textContent = Number(b.rating||0).toFixed(1);
 
-  document.getElementById('detailSummary').textContent = b.summary || '登録されていません';
+  document.getElementById('detailSummary').textContent = b.synopsis || '登録されていません';
   document.getElementById('detailComment').textContent = b.comment || '登録されていません';
+  document.getElementById('detailCommentLabel').textContent = b.registeredBy ? `${b.registeredBy}の感想` : '感想';
 
   const purchaseWrap = document.getElementById('detailPurchaseWrap');
   if(b.purchaseLink){
@@ -1146,13 +1195,14 @@ function openFormModal(id){
     document.getElementById('fAuthor').value = b.author || '';
     document.getElementById('fAge').value = b.targetAge || '';
     document.getElementById('fGenre').value = b.genre || '絵本';
-    document.getElementById('fCoverUrl').value = b.coverImageUrl || '';
-    document.getElementById('fSummary').value = b.summary || '';
+    document.getElementById('fCoverUrl').value = b.coverImage || '';
+    document.getElementById('fSummary').value = b.synopsis || '';
+    document.getElementById('fRegisteredBy').value = b.registeredBy || '';
     document.getElementById('fComment').value = b.comment || '';
     document.getElementById('fPurchaseLink').value = b.purchaseLink || '';
-    document.getElementById('fReadAloud').checked = !!b.isReadAloud;
+    document.getElementById('fReadAloud').checked = !!b.readAloud;
     setFormRating(Number(b.rating)||0);
-    updateCoverPreview(b.coverImageUrl);
+    updateCoverPreview(b.coverImage);
     if(b.childReaction){
       const btn = document.querySelector(`#fReactionToggle button[data-value="${b.childReaction}"]`);
       if(btn) btn.classList.add('selected');
@@ -1160,6 +1210,7 @@ function openFormModal(id){
   } else {
     document.getElementById('formModalTitle').textContent = '本を追加';
     setFormRating(0);
+    try{ document.getElementById('fRegisteredBy').value = localStorage.getItem('lastRegisteredBy') || ''; }catch(_){}
   }
   openModal('formModal');
 }
@@ -1197,21 +1248,25 @@ async function handleFormSubmit(e){
 
   const selectedReactionBtn = document.querySelector('#fReactionToggle button.selected');
 
-  const data = {
+  const original = state.editingId ? (state.books.find(b=>b.id===state.editingId) || {}) : {};
+  const registeredBy = document.getElementById('fRegisteredBy').value.trim();
+  try{ if(registeredBy) localStorage.setItem('lastRegisteredBy', registeredBy); }catch(_){}
+  const data = Object.assign({}, original, {
     id: state.editingId || undefined,
+    registeredBy,
     isbn: document.getElementById('fIsbn').value.trim(),
     title,
     author: document.getElementById('fAuthor').value.trim(),
     targetAge: document.getElementById('fAge').value.trim(),
     genre: document.getElementById('fGenre').value,
-    coverImageUrl: document.getElementById('fCoverUrl').value.trim(),
-    summary: document.getElementById('fSummary').value.trim(),
+    coverImage: document.getElementById('fCoverUrl').value.trim(),
+    synopsis: document.getElementById('fSummary').value.trim(),
     rating: state.formRating,
     comment: document.getElementById('fComment').value.trim(),
     purchaseLink: document.getElementById('fPurchaseLink').value.trim(),
-    isReadAloud: document.getElementById('fReadAloud').checked,
+    readAloud: document.getElementById('fReadAloud').checked,
     childReaction: selectedReactionBtn ? selectedReactionBtn.dataset.value : ''
-  };
+  });
 
   const submitBtn = document.getElementById('btnFormSubmit');
   submitBtn.disabled = true;
@@ -1219,12 +1274,12 @@ async function handleFormSubmit(e){
 
   try{
     if(state.editingId){
-      const updated = await apiWrite('update', data);
+      const updated = await apiWrite('update', { book: data });
       const idx = state.books.findIndex(b=>b.id===updated.id);
       if(idx>-1) state.books[idx] = updated;
       showToast('本を更新しました');
     } else {
-      const created = await apiWrite('add', data);
+      const created = await apiWrite('add', { book: data });
       state.books.unshift(created);
       showToast('本を追加しました');
     }
@@ -1554,13 +1609,15 @@ function bindGlobalEvents(){
     state.filters.search = e.target.value.trim();
     renderGrid();
   });
+  document.getElementById('filterRegisteredBy').addEventListener('change', e=>{ state.filters.registeredBy = e.target.value; renderStats(); renderGrid(); });
   document.getElementById('filterGenre').addEventListener('change', e=>{ state.filters.genre = e.target.value; renderGrid(); });
   document.getElementById('filterAge').addEventListener('change', e=>{ state.filters.age = e.target.value; renderGrid(); });
   document.getElementById('filterReaction').addEventListener('change', e=>{ state.filters.reaction = e.target.value; renderGrid(); });
   document.getElementById('filterReadStatus').addEventListener('change', e=>{ state.filters.readStatus = e.target.value; renderGrid(); });
   document.getElementById('sortBy').addEventListener('change', e=>{ state.sortBy = e.target.value; renderGrid(); });
   document.getElementById('btnResetFilter').addEventListener('click', ()=>{
-    state.filters = { genre:'', age:'', reaction:'', readStatus:'', search:'' };
+    state.filters = { registeredBy:'', genre:'', age:'', reaction:'', readStatus:'', search:'' };
+    document.getElementById('filterRegisteredBy').value='';
     state.sortBy = 'newest';
     document.getElementById('filterGenre').value='';
     document.getElementById('filterAge').value='';
