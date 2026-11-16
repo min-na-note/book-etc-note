@@ -775,6 +775,19 @@ const CONFIG = {
   }
 };
 
+// 表紙が見つからないときに表示する「NO IMAGE」画像（画像ファイル不要）
+const NO_IMAGE = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400" viewBox="0 0 300 400">' +
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+      '<stop offset="0" stop-color="#fff0b8"/><stop offset="1" stop-color="#ffd9e2"/>' +
+    '</linearGradient></defs>' +
+    '<rect width="300" height="400" fill="url(#g)"/>' +
+    '<text x="150" y="180" text-anchor="middle" font-size="64">📕</text>' +
+    '<text x="150" y="240" text-anchor="middle" font-family="sans-serif" font-size="28" font-weight="bold" fill="#9a8068">NO IMAGE</text>' +
+    '<text x="150" y="274" text-anchor="middle" font-family="sans-serif" font-size="16" fill="#9a8068">表紙画像なし</text>' +
+  '</svg>'
+);
+
 /* ============================================================
    状態
    ============================================================ */
@@ -953,21 +966,35 @@ function coverCandidates(b){
   }
   return Array.from(new Set(list));
 }
-// 画像の読み込みに失敗したら次の候補へ。全部だめなら📕を表示
+// 画像の読み込みに失敗したら次の候補へ。全部だめなら NO IMAGE を表示
 function coverNext(img){
   let list = [];
   try{ list = JSON.parse(decodeURIComponent(img.dataset.covers || '[]')); }catch(_){}
   const i = Number(img.dataset.i || 0) + 1;
   if(i < list.length){ img.dataset.i = i; img.src = list[i]; return; }
-  img.style.display = 'none';
-  if(img.nextElementSibling) img.nextElementSibling.style.display = 'flex';
+  img.onerror = null;
+  img.onload = null;
+  img.src = NO_IMAGE;
 }
-function setCoverImg(imgEl, list){
+// 1x1 の透明画像など、小さすぎる画像が返ってきたら失敗扱いにする
+function coverCheck(img){
+  if(img.src !== NO_IMAGE && (img.naturalWidth <= 40 || img.naturalHeight <= 40)) coverNext(img);
+}
+// 詳細モーダル用。useNoImage=true なら全滅時に NO IMAGE、false なら非表示にする
+function setCoverImg(imgEl, list, useNoImage){
   imgEl.onerror = null;
-  if(!list.length){ imgEl.removeAttribute('src'); imgEl.style.visibility = 'hidden'; return; }
+  imgEl.onload = null;
+  const giveUp = ()=>{
+    imgEl.onerror = null; imgEl.onload = null;
+    if(useNoImage){ imgEl.style.visibility = ''; imgEl.src = NO_IMAGE; }
+    else { imgEl.removeAttribute('src'); imgEl.style.visibility = 'hidden'; }
+  };
+  if(!list.length){ giveUp(); return; }
   imgEl.style.visibility = '';
   let i = 0;
-  imgEl.onerror = ()=>{ i++; if(i < list.length) imgEl.src = list[i]; else { imgEl.onerror = null; imgEl.style.visibility = 'hidden'; } };
+  const next = ()=>{ i++; if(i < list.length) imgEl.src = list[i]; else giveUp(); };
+  imgEl.onerror = next;
+  imgEl.onload = ()=>{ if(imgEl.naturalWidth <= 40 || imgEl.naturalHeight <= 40) next(); };
   imgEl.src = list[0];
 }
 
@@ -975,13 +1002,12 @@ function bookCardHtml(b){
   const reactionEmoji = { '好き':'💛','普通':'🙂','微妙':'😕' }[b.childReaction] || '';
   const covers = coverCandidates(b);
   const coverHtml = covers.length
-    ? `<img src="${escapeHtml(covers[0])}" data-covers="${escapeHtml(encodeURIComponent(JSON.stringify(covers)))}" alt="${escapeHtml(b.title)}" loading="lazy" referrerpolicy="no-referrer" onerror="coverNext(this)">`
-    : '';
+    ? `<img src="${escapeHtml(covers[0])}" data-covers="${escapeHtml(encodeURIComponent(JSON.stringify(covers)))}" alt="${escapeHtml(b.title)}" loading="lazy" referrerpolicy="no-referrer" onerror="coverNext(this)" onload="coverCheck(this)">`
+    : `<img src="${escapeHtml(NO_IMAGE)}" alt="${escapeHtml(b.title)}（表紙画像なし）">`;
   return `
   <div class="book-card" data-id="${b.id}">
     <div class="book-cover">
       ${coverHtml}
-      <div class="no-cover" style="${covers.length?'display:none;':''}">📕</div>
       ${b.genre ? `<span class="genre-tag" style="${genreVars(b.genre)}">${escapeHtml(b.genre)}</span>` : ''}
       ${b.isReadAloud ? `<span class="readaloud-badge" title="読み聞かせ済み">📖</span>` : ''}
       ${state.isAdmin ? `
@@ -1068,8 +1094,8 @@ function openDetailModal(id){
   state.detailBookId = id;
 
   const detailCovers = coverCandidates(b);
-  setCoverImg(document.getElementById('detailCover'), detailCovers);
-  setCoverImg(document.getElementById('detailCoverThumb'), detailCovers);
+  setCoverImg(document.getElementById('detailCover'), detailCovers, false);     // 上部の大きな背景：無ければ色だけ
+  setCoverImg(document.getElementById('detailCoverThumb'), detailCovers, true); // 小さい表紙：無ければ NO IMAGE
   document.getElementById('detailTitle').textContent = b.title;
   document.getElementById('detailAuthor').textContent = b.author || '著者不明';
 
@@ -1142,8 +1168,10 @@ function updateCoverPreview(url){
   const img = document.getElementById('fCoverPreview');
   const label = document.getElementById('fCoverPreviewLabel');
   if(url){
-    img.src = String(url).replace(/^http:\/\//i,'https://'); img.style.display='block';
-    label.textContent = 'プレビュー';
+    img.onerror = ()=>{ img.onerror = null; img.src = NO_IMAGE; label.textContent = '画像を読み込めませんでした'; };
+    img.src = url === NO_IMAGE ? url : String(url).replace(/^http:\/\//i,'https://');
+    img.style.display='block';
+    label.textContent = url === NO_IMAGE ? '表紙画像なし（一覧では NO IMAGE と表示されます）' : 'プレビュー';
   } else {
     img.style.display='none';
     label.textContent = '画像URLを入力するとプレビューが表示されます';
@@ -1343,6 +1371,8 @@ async function handleOpenBdFetch(){
     if(coverUrl){
       document.getElementById('fCoverUrl').value = coverUrl;
       updateCoverPreview(coverUrl);
+    } else if(!document.getElementById('fCoverUrl').value.trim()){
+      updateCoverPreview(NO_IMAGE); // 表紙URL欄は空のまま、プレビューだけ NO IMAGE
     }
 
     // あらすじ（すでに入力済みなら上書きしない）
