@@ -848,10 +848,10 @@ async function loadBooks(){
   state.isLoading = true;
   renderGrid();
   try{
-    const res = await fetch(CONFIG.GAS_API_URL);
+    const res = await fetch(`${CONFIG.GAS_API_URL}?action=getBooks`);
     const json = await res.json();
-    if(json.status !== 'ok') throw new Error(json.message || '読み込みに失敗しました');
-    state.books = json.data || [];
+    if(!isApiOk(json)) throw new Error(json.message || json.error || '読み込みに失敗しました');
+    state.books = (json.data || []).map(normalizeBookFromApi);
     state.users = json.users || [];
     populateFilterOptions();
     renderStats();
@@ -865,14 +865,41 @@ async function loadBooks(){
 
 // payload 例：{ book:{...} } / { id:'bk_...' }
 async function apiWrite(action, payload){
+  // 新旧どちらの GAS でも受け取れるよう、両方の形式・両方の列名で送る
+  const body = { action, password: state.adminPassword };
+  if(payload.book){
+    const b = Object.assign({}, payload.book);
+    b.summary = b.synopsis; b.coverImageUrl = b.coverImage; b.isReadAloud = b.readAloud;
+    body.book = b; body.data = b;
+  } else {
+    body.id = payload.id; body.data = { id: payload.id };
+  }
   const res = await fetch(CONFIG.GAS_API_URL, {
     method:'POST',
     headers:{ 'Content-Type':'text/plain;charset=utf-8' }, // CORSプリフライト回避
-    body: JSON.stringify(Object.assign({ action, password: state.adminPassword }, payload))
+    body: JSON.stringify(body)
   });
   const json = await res.json();
-  if(json.status !== 'ok') throw new Error(json.message || '処理に失敗しました');
-  return json.data;
+  if(!isApiOk(json)) throw new Error(json.message || json.error || '処理に失敗しました');
+  return json.data && typeof json.data === 'object' && json.data.title !== undefined
+    ? normalizeBookFromApi(json.data) : json.data;
+}
+
+// GAS の新形式 {status:'ok'} と旧形式 {success:true} の両方に対応
+function isApiOk(json){
+  return !!json && (json.status === 'ok' || json.success === true);
+}
+// 列名の新旧（synopsis/summary, coverImage/coverImageUrl, readAloud/isReadAloud）をそろえる
+function normalizeBookFromApi(b){
+  b = Object.assign({}, b);
+  if(b.synopsis === undefined || b.synopsis === '') b.synopsis = b.summary || '';
+  if(b.coverImage === undefined || b.coverImage === '') b.coverImage = b.coverImageUrl || '';
+  if(b.readAloud === undefined) b.readAloud = b.isReadAloud;
+  b.readAloud = (b.readAloud === true || String(b.readAloud).toUpperCase() === 'TRUE');
+  b.rating = Number(b.rating) || 0;
+  b.registeredBy = String(b.registeredBy || '').trim();
+  b.id = String(b.id || '');
+  return b;
 }
 
 /* ============================================================
